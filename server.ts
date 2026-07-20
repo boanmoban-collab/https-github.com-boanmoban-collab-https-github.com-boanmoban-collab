@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import dotenv from "dotenv";
+import crypto from "crypto";
 import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 
@@ -27,12 +28,224 @@ const ai = new GoogleGenAI({
   },
 });
 
+// MEXC Live API base configurations
+const MEXC_BASE_URL = "https://api.mexc.com";
+
+/**
+ * Calculates time offset between MEXC Server and local system
+ */
+async function getMexcServerTimeOffset(): Promise<number> {
+  try {
+    const start = Date.now();
+    const res = await fetch(`${MEXC_BASE_URL}/api/v3/time`);
+    if (!res.ok) throw new Error(`Could not reach MEXC API server: ${res.statusText}`);
+    const data: any = await res.json();
+    const end = Date.now();
+    const rtt = (end - start) / 2;
+    const serverTime = data.serverTime;
+    // Difference between MEXC's official time and local system time
+    return serverTime - (start + rtt);
+  } catch (error) {
+    console.error("Failed to synchronize with MEXC server time, using offset 0:", error);
+    return 0;
+  }
+}
+
+/**
+ * Formats a query string and signs it using HMAC-SHA256 with the secret key
+ */
+function generateSignature(queryString: string, secretKey: string): string {
+  return crypto
+    .createHmac("sha256", secretKey)
+    .update(queryString)
+    .digest("hex");
+}
+
 // API Routes
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });
 });
 
-// 1. Chat Arena Endpoint
+// 1. MEXC Spot Tickers Endpoint (Public)
+app.get("/api/mexc/tickers", async (req, res) => {
+  try {
+    const symbolsQuery = req.query.symbols as string; // Optional filter, e.g. ["BTCUSDT","ETHUSDT","MXUSDT"]
+    let url = `${MEXC_BASE_URL}/api/v3/ticker/price`;
+    if (symbolsQuery) {
+      url += `?symbols=${encodeURIComponent(symbolsQuery)}`;
+    }
+    
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`MEXC Ticker response failed: ${response.statusText}`);
+    }
+    const data = await response.json();
+    res.json(data);
+  } catch (error: any) {
+    console.error("Error in /api/mexc/tickers:", error);
+    res.status(500).json({ error: error.message || "Failed to fetch market ticker prices from MEXC." });
+  }
+});
+
+// Helper to extract keys from Headers or fallback to process.env
+function getMexcCredentials(req: express.Request) {
+  const clientKey = req.headers["x-mexc-client-key"] as string;
+  const clientSecret = req.headers["x-mexc-client-secret"] as string;
+
+  const finalKey = clientKey || process.env.MEXC_API_KEY;
+  const finalSecret = clientSecret || process.env.MEXC_SECRET_KEY;
+
+  return {
+    apiKey: finalKey,
+    apiSecret: finalSecret,
+    isUsingCustom: !!clientKey
+  };
+}
+
+// 2. MEXC Account Balances Endpoint (Private)
+app.get("/api/mexc/account", async (req, res) => {
+  try {
+    const { apiKey, apiSecret } = getMexcCredentials(req);
+
+    if (!apiKey || !apiSecret) {
+      res.status(401).json({
+        error: "Missing MEXC API credentials. Please configure your MEXC_API_KEY and MEXC_SECRET_KEY in Environment Settings, or fill in the secure credentials panel on the dashboard.",
+        code: "CREDENTIALS_MISSING"
+      });
+      return;
+    }
+
+    // Get time offset to align with MEXC security bounds
+    const timeOffset = await getMexcServerTimeOffset();
+    const timestamp = Date.now() + timeOffset;
+
+    // Build signed query
+    const queryString = `timestamp=${timestamp}&recvWindow=60000`;
+    const signature = generateSignature(queryString, apiSecret);
+    const finalUrl = `${MEXC_BASE_URL}/api/v3/account?${queryString}&signature=${signature}`;
+
+    console.log(`Fetching MEXC account info with timestamp: ${timestamp} (Offset: ${timeOffset}ms)`);
+
+    const response = await fetch(finalUrl, {
+      method: "GET",
+      headers: {
+        "X-MEXC-APIKEY": apiKey,
+        "Content-Type": "application/json"
+      }
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const errMsg = errorData.msg || errorData.message || `MEXC API error (HTTP ${response.status})`;
+      res.status(response.status).json({
+        error: errMsg,
+        raw: errorData
+      });
+      return;
+    }
+
+    const data = await response.json();
+    res.json({
+      balances: data.balances || [],
+      canTrade: data.canTrade,
+      accountType: data.accountType,
+      timestamp: timestamp
+    });
+  } catch (error: any) {
+    console.error("Error in /api/mexc/account:", error);
+    res.status(500).json({ error: error.message || "Failed to fetch account info from MEXC." });
+  }
+});
+
+// 3. MEXC Order Placement Endpoint (Private)
+app.post("/api/mexc/order", async (req, res) => {
+  try {
+    const { apiKey, apiSecret } = getMexcCredentials(req);
+    const { symbol, side, type, quantity, price } = req.body;
+
+    if (!apiKey || !apiSecret) {
+      res.status(401).json({
+        error: "Missing MEXC API credentials. Configure MEXC_API_KEY and MEXC_SECRET_KEY.",
+        code: "CREDENTIALS_MISSING"
+      });
+      return;
+    }
+
+    if (!symbol || !side || !type || !quantity) {
+      res.status(400).json({ error: "Missing required order parameters: symbol, side, type, quantity." });
+      return;
+    }
+
+    // Sanitize values
+    const upperSymbol = symbol.toUpperCase().trim();
+    const upperSide = side.toUpperCase().trim();
+    const upperType = type.toUpperCase().trim();
+
+    // Sync time with MEXC Server
+    const timeOffset = await getMexcServerTimeOffset();
+    const timestamp = Date.now() + timeOffset;
+
+    // Create parameters
+    const params: Record<string, string> = {
+      symbol: upperSymbol,
+      side: upperSide,
+      type: upperType,
+      quantity: quantity.toString(),
+      timestamp: timestamp.toString(),
+      recvWindow: "60000"
+    };
+
+    if (upperType === "LIMIT") {
+      if (!price) {
+        res.status(400).json({ error: "Limit orders require a price parameter." });
+        return;
+      }
+      params.price = price.toString();
+      params.timeInForce = "GTC"; // Good Til Cancelled is standard for spot limit orders
+    }
+
+    // Build sorted/serialized query string
+    const queryParts = Object.keys(params)
+      .map(key => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`);
+    const queryString = queryParts.join("&");
+    const signature = generateSignature(queryString, apiSecret);
+
+    const finalUrl = `${MEXC_BASE_URL}/api/v3/order?${queryString}&signature=${signature}`;
+
+    console.log(`Placing MEXC ${upperType} ${upperSide} order for ${upperSymbol} qty: ${quantity}`);
+
+    const response = await fetch(finalUrl, {
+      method: "POST",
+      headers: {
+        "X-MEXC-APIKEY": apiKey,
+        "Content-Type": "application/json"
+      }
+    });
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const errMsg = data.msg || data.message || `MEXC API error (HTTP ${response.status})`;
+      res.status(response.status).json({
+        error: errMsg,
+        raw: data,
+        parametersSent: params
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      order: data,
+      timestamp: timestamp
+    });
+  } catch (error: any) {
+    console.error("Error in /api/mexc/order:", error);
+    res.status(500).json({ error: error.message || "Failed to execute order on MEXC." });
+  }
+});
+
+// 4. Chat Arena Endpoint
 app.post("/api/chat", async (req, res) => {
   try {
     const { messages, chatbotId } = req.body;
@@ -93,7 +306,7 @@ Adopt a high-energy, direct, and fast-paced tone. Answer briefly but correctly.`
   }
 });
 
-// 2. Image Studio Endpoint
+// 5. Image Studio Endpoint
 app.post("/api/generate-image", async (req, res) => {
   try {
     const { prompt, imageSize, aspectRatio } = req.body;

@@ -29,3 +29,51 @@ export interface GeneratedImage {
   aspectRatio: string;
   timestamp: Date;
 }
+
+export interface MexcBalance {
+  asset: string;
+  free: string;
+  locked: string;
+}
+
+export interface MexcTicker {
+  symbol: string;
+  price: string;
+  change24h?: string;
+  volume24h?: string;
+}
+
+export interface MexcOrderPayload {
+  symbol: string;
+  side: "BUY" | "SELL";
+  type: "LIMIT" | "MARKET";
+  quantity: string;
+  price?: string; // Optional for MARKET orders
+}
+
+export interface MexcOrderResponse {
+  symbol: string;
+  orderId: string;
+  orderListId: number;
+  clientOrderId: string;
+  transactTime: number;
+  price: string;
+  origQty: string;
+  executedQty: string;
+  cummulativeQuoteQty: string;
+  status: string;
+  timeInForce: string;
+  type: string;
+  side: string;
+}
+
+export interface ExecutionLog {
+  id: string;
+  timestamp: Date;
+  type: "info" | "success" | "error" | "warning";
+  endpoint: string;
+  message: string;
+  payload?: string;
+  response?: string;
+}
+
