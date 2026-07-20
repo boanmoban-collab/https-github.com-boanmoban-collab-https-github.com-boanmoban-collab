@@ -1,0 +1,49 @@
+# .github/workflows/maria_production_build.yml
+name: Build Maria Production APK
+
+on:
+  push:
+    branches:
+      - main
+      - production
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Java Development Kit (JDK)
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '12.x'
+          cache: 'gradle'
+
+      - name: Setup Flutter Engine
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.x'
+          channel: 'stable'
+          cache: true
+
+      - name: Install Project Dependencies
+        run: flutter pub get
+
+      - name: Build Production Android Release APK
+        # استخدام المتغيرات الآمنة الممررة كأسرار (GitHub Secrets) لتضمينها أثناء البناء
+        env:
+          MEXC_API_KEY: ${{ secrets.MEXC_API_KEY }}
+          MEXC_SECRET_KEY: ${{ secrets.MEXC_SECRET_KEY }}
+        run: |
+          flutter build apk --release \
+            --dart-define=MEXC_API_KEY=$MEXC_API_KEY \
+            --dart-define=MEXC_SECRET_KEY=$MEXC_SECRET_KEY
+
+      - name: Upload Production APK Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: maria-live-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          
