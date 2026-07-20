@@ -1,0 +1,6 @@
+{
+  "name": "Gemini Chat and Image Studio",
+  "description": "An interactive full-stack creative studio featuring a multi-role Gemini chatbot and high-quality image generation using the Gemini 3 Pro Image model.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
